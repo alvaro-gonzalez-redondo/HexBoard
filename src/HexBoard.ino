@@ -94,12 +94,6 @@ byte Hardware_Version = 0;  // 0 = unknown, 1 = v1.1 board. 2 = v1.2 board.
 
 // @helpers
 
-struct Rational {
-    int n;
-    int d;
-    float error;
-};
-
 enum PrimeLimit : uint8_t {
     LIMIT_1 = 0,
     LIMIT_3,
@@ -135,29 +129,6 @@ constexpr float PRIME_LIMIT_HUES[] = {
   0.0f,    // LIMIT_17 -> gris / apagado
   0.0f     // LIMIT_COMPLEX
 };
-
-
-static inline PrimeLimit get_prime_limit(uint32_t n) {
-    if (n <= 1) return LIMIT_1;
-
-    // eliminar octavas
-    while ((n & 1) == 0) {
-        n >>= 1;
-    }
-
-    // detectar primos grandes primero
-    if (n % 17 == 0) return LIMIT_17;
-    if (n % 13 == 0) return LIMIT_13;
-    if (n % 11 == 0) return LIMIT_11;
-    if (n % 7  == 0) return LIMIT_7;
-    if (n % 5  == 0) return LIMIT_5;
-    if (n % 3  == 0) return LIMIT_3;
-
-    // si queda algo distinto de 1 → primo >17
-    if (n != 1) return LIMIT_COMPLEX;
-
-    return LIMIT_1;
-}
 
 
 //might be redundant
@@ -2767,108 +2738,76 @@ void lightUpLEDs() {
 // ============================================================
 
 void RAM_FUNC(updateDynamicLighting)() {
+  if (!currentHarmonicLUT || currentHarmonicEDO == 0) return;
 
-  // ----------------------------------------------------------
-  // Validaciones defensivas
-  // ----------------------------------------------------------
-  if (!currentHarmonicLUT || currentHarmonicEDO == 0) {
-    return;
-  }
-
-  // Si no hay teclas activas, fallback a modo incandescente estático
   if (pressedKeyIDs.empty()) {
-    // Fallback: use incandescente estático
+    // Restaurar iluminación estática (opcional, o dejar apagado)
     byte prevMode = colorMode;
-    colorMode = PIANO_INCANDESCENT_COLOR_MODE;
+    colorMode = PIANO_COLOR_MODE; // O el modo por defecto que prefieras
     setLEDcolorCodes();
     colorMode = prevMode;
     return;
   }
 
-  // ----------------------------------------------------------
-  // Bucle principal: para cada LED del tablero
-  // ----------------------------------------------------------
   for (byte i = 0; i < LED_COUNT; i++) {
-    float brightness = 1.0f;
-
     // Ignorar teclas de comando
     if (h[i].isCmd) {
-      h[i].LEDcodeRest = 0;
+      h[i].LEDcodeRest = 0; // O el color de comando por defecto
       continue;
     }
 
-    // Estado acumulado
+    float brightness = 1.0f;
     uint8_t bestPrimeLimit = LIMIT_COMPLEX;
-    bool isConsonant = true;
+    bool isConsonant = true; 
 
-    // ------------------------------------------------------
-    // Comparar este LED con cada tecla activa
-    // ------------------------------------------------------
     for (byte activeKey : pressedKeyIDs) {
-
-      // Distancia interválica en steps
-      int16_t distSteps =
-          h[i].stepsFromC - h[activeKey].stepsFromC;
-
-      // Módulo EDO (positivo)
+      int16_t distSteps = h[i].stepsFromC - h[activeKey].stepsFromC;
       distSteps = positiveMod(distSteps, currentHarmonicEDO);
 
-      // Unísono: permitido, pero no aporta color
+      // --- CORRECCIÓN UNÍSONO ---
       if (distSteps == 0) {
-        continue;
+          if (LIMIT_1 < bestPrimeLimit) bestPrimeLimit = LIMIT_1;
+          continue; 
       }
+      // ---------------------------
 
-      // Lookup armónico
-      const HarmonicStep& hs =
-          currentHarmonicLUT[distSteps];
+      const HarmonicStep& hs = currentHarmonicLUT[distSteps];
 
-      // Comprobación de consonancia
+      // Cálculo de error
       int16_t stepError = abs(distSteps - hs.idealStep);
+      stepError = min(stepError, (int16_t)(currentHarmonicEDO - stepError)); // Wrap error
 
-      // Ajuste circular (wrap)
-      stepError = min(stepError, currentHarmonicEDO - stepError);
-      int maxErr = min(hs.maxError, 2);  // clamp perceptual
-      /*
-      if (stepError > maxErr) {
-        brightness = 0.0f;
-        break;
+      // Atenuación suave (Curva cuártica)
+      if (hs.maxError > 0) {
+          float x = (float)stepError / (float)hs.maxError;
+          if (x > 1.0f) x = 1.0f;
+          float atten = 1.0f - x;
+          brightness *= (atten * atten * atten * atten);
       }
-      */
 
-      // atenuación suave
-      float x = float(stepError) / float(hs.maxError); // 0..1
-      float atten = 1.0f - x;
-      atten = atten * atten * atten * atten;   // A la cuarta (mucho más perceptual)
-      brightness *= atten;
-
-      // Actualizar límite primo dominante
+      // Actualizar mejor límite primo (el menor es el más estable)
       if (hs.primeLimit < bestPrimeLimit) {
         bestPrimeLimit = hs.primeLimit;
       }
-
-      if (hs.primeLimit >= LIMIT_7) {
-          brightness *= 0.6f;
+      
+      // Penalización extra para límites altos (opcional, para limpiar visualmente)
+      if (hs.primeLimit >= LIMIT_11) {
+          brightness *= 0.85f; 
       }
     }
 
-    // ------------------------------------------------------
-    // Decidir color final
-    // ------------------------------------------------------
-    if (!isConsonant) {
-      // Disonante con al menos una tecla activa
-      h[i].LEDcodeRest = 0;
+    // Umbral de corte para apagar LEDs muy tenues (ahorra energía y limpia visualmente)
+    if (brightness < 0.05f) {
+        h[i].LEDcodeRest = 0;
     } else {
-      colorDef c;
-      c.hue = PRIME_LIMIT_HUES[bestPrimeLimit];
-      c.sat = SAT_VIVID;     // coherente con otros modos
-      c.val = VALUE_NORMAL; // valor base
-
-      // aplicar control global de brillo
-      byte baseVal = VALUE_NORMAL;
-      byte attenVal = byte(baseVal * brightness);
-      c.val = applyLEDLevel(attenVal, ledRestBrightness);
-
-      h[i].LEDcodeRest = getLEDcode(c);
+        colorDef c;
+        c.hue = PRIME_LIMIT_HUES[bestPrimeLimit];
+        c.sat = 255; // Saturación máxima
+        // Aplicar brillo calculado sobre el brillo base global
+        byte finalVal = (byte)(brightness * 255.0f);
+        c.val = applyLEDLevel(finalVal, ledRestBrightness);
+        
+        h[i].LEDcodeRest = getLEDcode(c);
     }
   }
 }
