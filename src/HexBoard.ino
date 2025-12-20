@@ -2787,6 +2787,7 @@ void RAM_FUNC(updateDynamicLighting)() {
   // Bucle principal: para cada LED del tablero
   // ----------------------------------------------------------
   for (byte i = 0; i < LED_COUNT; i++) {
+    float brightness = 1.0f;
 
     // Ignorar teclas de comando
     if (h[i].isCmd) {
@@ -2820,17 +2821,22 @@ void RAM_FUNC(updateDynamicLighting)() {
           currentHarmonicLUT[distSteps];
 
       // Comprobación de consonancia
-      int16_t stepError =
-          abs(distSteps - hs.idealStep);
+      int16_t stepError = abs(distSteps - hs.idealStep);
 
       // Ajuste circular (wrap)
-      stepError = min(stepError,
-                      currentHarmonicEDO - stepError);
-
-      if (stepError > hs.maxError) {
-        isConsonant = false;
-        break;  // basta una disonancia
+      stepError = min(stepError, currentHarmonicEDO - stepError);
+      int maxErr = min(hs.maxError, 4);  // clamp perceptual
+      if (stepError > maxErr) {
+        brightness = 0.0f;
+        break;
       }
+
+      // atenuación suave
+      float x = float(stepError) / float(hs.maxError); // 0..1
+      float atten = 1.0f - x;
+      atten = atten * atten * atten;   // cúbica (mucho más perceptual)
+      brightness *= atten;
+
 
       // Actualizar límite primo dominante
       if (hs.primeLimit < bestPrimeLimit) {
@@ -2851,7 +2857,9 @@ void RAM_FUNC(updateDynamicLighting)() {
       c.val = VALUE_NORMAL; // valor base
 
       // aplicar control global de brillo
-      c.val = applyLEDLevel(c.val, ledRestBrightness);
+      byte baseVal = VALUE_NORMAL;
+      byte attenVal = byte(baseVal * brightness);
+      c.val = applyLEDLevel(attenVal, ledRestBrightness);
 
       h[i].LEDcodeRest = getLEDcode(c);
     }
@@ -3747,7 +3755,10 @@ void tryMIDInoteOff(byte x) {
   if (h[x].MIDIch) {  // but just in case, check
     if (midiD & MIDID_USB) UMIDI.sendNoteOff(h[x].note, velWheel.curValue, h[x].MIDIch);
     if (midiD & MIDID_SER) SMIDI.sendNoteOff(h[x].note, velWheel.curValue, h[x].MIDIch);
-    pressedKeyIDs.pop_back();  // Dynamic JI pressed key tracking
+    auto it = std::find(pressedKeyIDs.begin(), pressedKeyIDs.end(), x);
+    if (it != pressedKeyIDs.end()) {
+      pressedKeyIDs.erase(it);
+    }
     h[x].jiRetune = 0;
     h[x].jiFrequencyMultiplier = 1.0f;
     sendToLog(
