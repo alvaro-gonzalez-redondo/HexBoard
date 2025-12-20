@@ -93,6 +93,73 @@
 byte Hardware_Version = 0;  // 0 = unknown, 1 = v1.1 board. 2 = v1.2 board.
 
 // @helpers
+
+struct Rational {
+    int n;
+    int d;
+    float error;
+};
+
+enum PrimeLimit : uint8_t {
+    LIMIT_1 = 0,
+    LIMIT_3,
+    LIMIT_5,
+    LIMIT_7,
+    LIMIT_11,
+    LIMIT_13,
+    LIMIT_17,
+    LIMIT_COMPLEX,
+    LIMIT_COUNT
+};
+
+
+/*
+constexpr uint32_t LIMIT_COLORS[LIMIT_COUNT] = {
+    0xFFFFFF, // LIMIT_1
+    0x78DC78, // LIMIT_3
+    0xFFC85A, // LIMIT_5
+    0xFF785A, // LIMIT_7
+    0xB464FF, // LIMIT_11
+    0x5A96FF, // LIMIT_13
+    0x787878, // LIMIT_17
+    0x404040  // LIMIT_COMPLEX
+};
+*/
+constexpr float PRIME_LIMIT_HUES[] = {
+  0.0f,    // LIMIT_1  -> blanco / neutro (no se usa mucho)
+  120.0f,  // LIMIT_3  -> verde (quinta)
+  50.0f,   // LIMIT_5  -> amarillo (terceras)
+  10.0f,   // LIMIT_7  -> rojo-anaranjado
+  270.0f,  // LIMIT_11 -> violeta
+  210.0f,  // LIMIT_13 -> azul
+  0.0f,    // LIMIT_17 -> gris / apagado
+  0.0f     // LIMIT_COMPLEX
+};
+
+
+static inline PrimeLimit get_prime_limit(uint32_t n) {
+    if (n <= 1) return LIMIT_1;
+
+    // eliminar octavas
+    while ((n & 1) == 0) {
+        n >>= 1;
+    }
+
+    // detectar primos grandes primero
+    if (n % 17 == 0) return LIMIT_17;
+    if (n % 13 == 0) return LIMIT_13;
+    if (n % 11 == 0) return LIMIT_11;
+    if (n % 7  == 0) return LIMIT_7;
+    if (n % 5  == 0) return LIMIT_5;
+    if (n % 3  == 0) return LIMIT_3;
+
+    // si queda algo distinto de 1 → primo >17
+    if (n != 1) return LIMIT_COMPLEX;
+
+    return LIMIT_1;
+}
+
+
 //might be redundant
 std::vector<byte> pressedKeyIDs = {};
 std::array<std::vector<uint8_t>, 128> midiNoteToHexIndices = {};
@@ -257,6 +324,7 @@ byte currWave = WAVEFORM_HYBRID;
 #define PIANO_ALT_COLOR_MODE 4
 #define PIANO_COLOR_MODE 5
 #define PIANO_INCANDESCENT_COLOR_MODE 6
+#define DYNAMIC_HARMONIC_MODE 7
 byte colorMode = RAINBOW_MODE;
 
 #define ANIMATE_BUTTON 0
@@ -1479,6 +1547,742 @@ void detectHardwareVersion() {
   sendToLog("Hardware detection: revision " + std::to_string(Hardware_Version));
 }
 
+struct HarmonicStep {
+    uint8_t primeLimit;   // enum PrimeLimit (3,5,7,11…)
+    int8_t  idealStep;    // desplazamiento ideal en steps (puede ser igual al índice)
+    uint8_t maxError;     // error máximo permitido (en steps * 10, por ejemplo)
+};
+
+struct HarmonicLUTDesc {
+    uint8_t edo;
+    const HarmonicStep* lut;
+};
+
+// =======================
+// Harmonic LUT for 12-EDO
+// =======================
+constexpr HarmonicStep harmonicLUT_12[12] = {
+    { LIMIT_1, 0, 1 },
+    { LIMIT_5, 1, 1 },
+    { LIMIT_3, 2, 1 },
+    { LIMIT_5, 3, 1 },
+    { LIMIT_5, 4, 1 },
+    { LIMIT_3, 5, 1 },
+    { LIMIT_7, 6, 1 },
+    { LIMIT_3, 7, 1 },
+    { LIMIT_5, 8, 1 },
+    { LIMIT_5, 9, 1 },
+    { LIMIT_3, 10, 1 },
+    { LIMIT_5, 11, 1 },
+};
+
+// =======================
+// Harmonic LUT for 17-EDO
+// =======================
+constexpr HarmonicStep harmonicLUT_17[17] = {
+    { LIMIT_1, 0, 1 },
+    { LIMIT_COMPLEX, 1, 1 },
+    { LIMIT_11, 2, 1 },
+    { LIMIT_3, 3, 1 },
+    { LIMIT_7, 4, 1 },
+    { LIMIT_13, 5, 1 },
+    { LIMIT_7, 6, 1 },
+    { LIMIT_3, 7, 1 },
+    { LIMIT_7, 8, 1 },
+    { LIMIT_7, 9, 1 },
+    { LIMIT_3, 10, 1 },
+    { LIMIT_7, 11, 1 },
+    { LIMIT_13, 12, 1 },
+    { LIMIT_7, 13, 1 },
+    { LIMIT_3, 14, 1 },
+    { LIMIT_COMPLEX, 15, 1 },
+    { LIMIT_COMPLEX, 16, 1 },
+};
+
+// =======================
+// Harmonic LUT for 19-EDO
+// =======================
+constexpr HarmonicStep harmonicLUT_19[19] = {
+    { LIMIT_1, 0, 1 },
+    { LIMIT_COMPLEX, 1, 1 },
+    { LIMIT_5, 2, 1 },
+    { LIMIT_3, 3, 1 },
+    { LIMIT_7, 4, 1 },
+    { LIMIT_5, 5, 1 },
+    { LIMIT_5, 6, 1 },
+    { LIMIT_7, 7, 1 },
+    { LIMIT_3, 8, 1 },
+    { LIMIT_7, 9, 1 },
+    { LIMIT_7, 10, 1 },
+    { LIMIT_3, 11, 1 },
+    { LIMIT_7, 12, 1 },
+    { LIMIT_5, 13, 1 },
+    { LIMIT_5, 14, 1 },
+    { LIMIT_7, 15, 1 },
+    { LIMIT_3, 16, 1 },
+    { LIMIT_5, 17, 1 },
+    { LIMIT_COMPLEX, 18, 1 },
+};
+
+// =======================
+// Harmonic LUT for 22-EDO
+// =======================
+constexpr HarmonicStep harmonicLUT_22[22] = {
+    { LIMIT_1, 0, 1 },
+    { LIMIT_COMPLEX, 1, 1 },
+    { LIMIT_5, 2, 1 },
+    { LIMIT_11, 3, 1 },
+    { LIMIT_3, 4, 1 },
+    { LIMIT_7, 5, 1 },
+    { LIMIT_5, 6, 1 },
+    { LIMIT_5, 7, 1 },
+    { LIMIT_7, 8, 1 },
+    { LIMIT_3, 9, 1 },
+    { LIMIT_11, 10, 1 },
+    { LIMIT_7, 11, 1 },
+    { LIMIT_11, 12, 1 },
+    { LIMIT_3, 13, 1 },
+    { LIMIT_7, 14, 1 },
+    { LIMIT_5, 15, 1 },
+    { LIMIT_5, 16, 1 },
+    { LIMIT_7, 17, 1 },
+    { LIMIT_3, 18, 1 },
+    { LIMIT_COMPLEX, 19, 1 },
+    { LIMIT_5, 20, 1 },
+    { LIMIT_COMPLEX, 21, 1 },
+};
+
+// =======================
+// Harmonic LUT for 24-EDO
+// =======================
+constexpr HarmonicStep harmonicLUT_24[24] = {
+    { LIMIT_1, 0, 1 },
+    { LIMIT_COMPLEX, 1, 1 },
+    { LIMIT_5, 2, 1 },
+    { LIMIT_11, 3, 1 },
+    { LIMIT_3, 4, 1 },
+    { LIMIT_7, 5, 1 },
+    { LIMIT_5, 6, 1 },
+    { LIMIT_13, 7, 1 },
+    { LIMIT_5, 8, 1 },
+    { LIMIT_7, 9, 1 },
+    { LIMIT_3, 10, 1 },
+    { LIMIT_11, 11, 1 },
+    { LIMIT_7, 12, 1 },
+    { LIMIT_11, 13, 1 },
+    { LIMIT_3, 14, 1 },
+    { LIMIT_7, 15, 1 },
+    { LIMIT_5, 16, 1 },
+    { LIMIT_13, 17, 1 },
+    { LIMIT_5, 18, 1 },
+    { LIMIT_7, 19, 1 },
+    { LIMIT_3, 20, 1 },
+    { LIMIT_COMPLEX, 21, 1 },
+    { LIMIT_5, 22, 1 },
+    { LIMIT_COMPLEX, 23, 1 },
+};
+
+// =======================
+// Harmonic LUT for 31-EDO
+// =======================
+constexpr HarmonicStep harmonicLUT_31[31] = {
+    { LIMIT_1, 0, 1 },
+    { LIMIT_COMPLEX, 1, 2 },
+    { LIMIT_COMPLEX, 2, 2 },
+    { LIMIT_5, 3, 1 },
+    { LIMIT_11, 4, 1 },
+    { LIMIT_3, 5, 1 },
+    { LIMIT_7, 6, 1 },
+    { LIMIT_7, 7, 1 },
+    { LIMIT_5, 8, 1 },
+    { LIMIT_13, 9, 1 },
+    { LIMIT_5, 10, 1 },
+    { LIMIT_7, 11, 1 },
+    { LIMIT_COMPLEX, 12, 2 },
+    { LIMIT_3, 13, 1 },
+    { LIMIT_11, 14, 1 },
+    { LIMIT_7, 15, 1 },
+    { LIMIT_7, 16, 1 },
+    { LIMIT_11, 17, 1 },
+    { LIMIT_3, 18, 1 },
+    { LIMIT_COMPLEX, 19, 2 },
+    { LIMIT_7, 20, 1 },
+    { LIMIT_5, 21, 1 },
+    { LIMIT_13, 22, 1 },
+    { LIMIT_5, 23, 1 },
+    { LIMIT_7, 24, 1 },
+    { LIMIT_7, 25, 1 },
+    { LIMIT_3, 26, 1 },
+    { LIMIT_COMPLEX, 27, 2 },
+    { LIMIT_5, 28, 1 },
+    { LIMIT_COMPLEX, 29, 2 },
+    { LIMIT_COMPLEX, 30, 2 },
+};
+
+// =======================
+// Harmonic LUT for 41-EDO
+// =======================
+constexpr HarmonicStep harmonicLUT_41[41] = {
+    { LIMIT_1, 0, 1 },
+    { LIMIT_COMPLEX, 1, 2 },
+    { LIMIT_COMPLEX, 2, 2 },
+    { LIMIT_5, 4, 1 },
+    { LIMIT_5, 4, 1 },
+    { LIMIT_11, 5, 2 },
+    { LIMIT_11, 5, 2 },
+    { LIMIT_3, 7, 1 },
+    { LIMIT_7, 8, 1 },
+    { LIMIT_7, 9, 1 },
+    { LIMIT_5, 11, 1 },
+    { LIMIT_5, 11, 1 },
+    { LIMIT_13, 12, 2 },
+    { LIMIT_5, 13, 1 },
+    { LIMIT_5, 13, 1 },
+    { LIMIT_7, 15, 1 },
+    { LIMIT_COMPLEX, 16, 2 },
+    { LIMIT_3, 17, 1 },
+    { LIMIT_11, 19, 2 },
+    { LIMIT_11, 19, 2 },
+    { LIMIT_7, 20, 1 },
+    { LIMIT_7, 21, 1 },
+    { LIMIT_11, 22, 2 },
+    { LIMIT_11, 22, 2 },
+    { LIMIT_3, 24, 1 },
+    { LIMIT_COMPLEX, 25, 2 },
+    { LIMIT_7, 26, 1 },
+    { LIMIT_5, 28, 1 },
+    { LIMIT_5, 28, 1 },
+    { LIMIT_13, 29, 2 },
+    { LIMIT_5, 30, 1 },
+    { LIMIT_5, 30, 1 },
+    { LIMIT_7, 32, 1 },
+    { LIMIT_7, 33, 1 },
+    { LIMIT_3, 34, 1 },
+    { LIMIT_COMPLEX, 35, 2 },
+    { LIMIT_COMPLEX, 36, 2 },
+    { LIMIT_5, 37, 1 },
+    { LIMIT_5, 37, 1 },
+    { LIMIT_COMPLEX, 39, 2 },
+    { LIMIT_COMPLEX, 40, 2 },
+};
+
+// =======================
+// Harmonic LUT for 43-EDO
+// =======================
+constexpr HarmonicStep harmonicLUT_43[43] = {
+    { LIMIT_1, 0, 1 },
+    { LIMIT_COMPLEX, 1, 2 },
+    { LIMIT_COMPLEX, 2, 2 },
+    { LIMIT_COMPLEX, 3, 2 },
+    { LIMIT_5, 4, 1 },
+    { LIMIT_11, 5, 2 },
+    { LIMIT_11, 5, 2 },
+    { LIMIT_3, 7, 1 },
+    { LIMIT_3, 7, 1 },
+    { LIMIT_7, 10, 1 },
+    { LIMIT_7, 10, 1 },
+    { LIMIT_5, 11, 1 },
+    { LIMIT_5, 11, 1 },
+    { LIMIT_5, 14, 1 },
+    { LIMIT_5, 14, 1 },
+    { LIMIT_7, 16, 1 },
+    { LIMIT_7, 16, 1 },
+    { LIMIT_COMPLEX, 17, 2 },
+    { LIMIT_3, 18, 1 },
+    { LIMIT_11, 20, 2 },
+    { LIMIT_7, 21, 1 },
+    { LIMIT_7, 21, 1 },
+    { LIMIT_7, 22, 1 },
+    { LIMIT_7, 22, 1 },
+    { LIMIT_11, 23, 2 },
+    { LIMIT_3, 25, 1 },
+    { LIMIT_COMPLEX, 26, 2 },
+    { LIMIT_7, 27, 1 },
+    { LIMIT_7, 27, 1 },
+    { LIMIT_5, 29, 1 },
+    { LIMIT_5, 29, 1 },
+    { LIMIT_5, 32, 1 },
+    { LIMIT_5, 32, 1 },
+    { LIMIT_7, 33, 1 },
+    { LIMIT_7, 33, 1 },
+    { LIMIT_3, 36, 1 },
+    { LIMIT_3, 36, 1 },
+    { LIMIT_COMPLEX, 37, 2 },
+    { LIMIT_COMPLEX, 38, 2 },
+    { LIMIT_5, 39, 1 },
+    { LIMIT_COMPLEX, 40, 2 },
+    { LIMIT_COMPLEX, 41, 2 },
+    { LIMIT_COMPLEX, 42, 2 },
+};
+
+// =======================
+// Harmonic LUT for 46-EDO
+// =======================
+constexpr HarmonicStep harmonicLUT_46[46] = {
+    { LIMIT_1, 0, 1 },
+    { LIMIT_COMPLEX, 1, 2 },
+    { LIMIT_COMPLEX, 2, 2 },
+    { LIMIT_COMPLEX, 3, 2 },
+    { LIMIT_5, 4, 1 },
+    { LIMIT_5, 4, 1 },
+    { LIMIT_11, 6, 2 },
+    { LIMIT_COMPLEX, 7, 2 },
+    { LIMIT_3, 8, 1 },
+    { LIMIT_7, 9, 1 },
+    { LIMIT_7, 10, 1 },
+    { LIMIT_7, 10, 1 },
+    { LIMIT_5, 12, 1 },
+    { LIMIT_5, 12, 1 },
+    { LIMIT_5, 15, 1 },
+    { LIMIT_5, 15, 1 },
+    { LIMIT_7, 17, 1 },
+    { LIMIT_7, 17, 1 },
+    { LIMIT_COMPLEX, 18, 2 },
+    { LIMIT_3, 19, 1 },
+    { LIMIT_11, 21, 2 },
+    { LIMIT_11, 21, 2 },
+    { LIMIT_7, 22, 1 },
+    { LIMIT_7, 24, 1 },
+    { LIMIT_7, 24, 1 },
+    { LIMIT_11, 25, 2 },
+    { LIMIT_11, 25, 2 },
+    { LIMIT_3, 27, 1 },
+    { LIMIT_COMPLEX, 28, 2 },
+    { LIMIT_7, 29, 1 },
+    { LIMIT_7, 29, 1 },
+    { LIMIT_5, 31, 1 },
+    { LIMIT_5, 31, 1 },
+    { LIMIT_5, 34, 1 },
+    { LIMIT_5, 34, 1 },
+    { LIMIT_7, 36, 1 },
+    { LIMIT_7, 36, 1 },
+    { LIMIT_7, 37, 1 },
+    { LIMIT_3, 38, 1 },
+    { LIMIT_COMPLEX, 39, 2 },
+    { LIMIT_COMPLEX, 40, 2 },
+    { LIMIT_5, 42, 1 },
+    { LIMIT_5, 42, 1 },
+    { LIMIT_COMPLEX, 43, 2 },
+    { LIMIT_COMPLEX, 44, 2 },
+    { LIMIT_COMPLEX, 45, 2 },
+};
+
+// =======================
+// Harmonic LUT for 53-EDO
+// =======================
+constexpr HarmonicStep harmonicLUT_53[53] = {
+    { LIMIT_1, 0, 1 },
+    { LIMIT_COMPLEX, 1, 3 },
+    { LIMIT_COMPLEX, 2, 3 },
+    { LIMIT_COMPLEX, 3, 3 },
+    { LIMIT_5, 5, 2 },
+    { LIMIT_5, 5, 2 },
+    { LIMIT_5, 5, 2 },
+    { LIMIT_11, 7, 2 },
+    { LIMIT_COMPLEX, 8, 3 },
+    { LIMIT_3, 9, 1 },
+    { LIMIT_7, 10, 2 },
+    { LIMIT_7, 12, 2 },
+    { LIMIT_7, 12, 2 },
+    { LIMIT_5, 14, 2 },
+    { LIMIT_5, 14, 2 },
+    { LIMIT_5, 14, 2 },
+    { LIMIT_5, 17, 2 },
+    { LIMIT_5, 17, 2 },
+    { LIMIT_5, 17, 2 },
+    { LIMIT_7, 19, 2 },
+    { LIMIT_7, 19, 2 },
+    { LIMIT_COMPLEX, 21, 3 },
+    { LIMIT_3, 22, 1 },
+    { LIMIT_COMPLEX, 23, 3 },
+    { LIMIT_11, 24, 2 },
+    { LIMIT_7, 26, 2 },
+    { LIMIT_7, 26, 2 },
+    { LIMIT_7, 27, 2 },
+    { LIMIT_7, 27, 2 },
+    { LIMIT_11, 29, 2 },
+    { LIMIT_COMPLEX, 30, 3 },
+    { LIMIT_3, 31, 1 },
+    { LIMIT_COMPLEX, 32, 3 },
+    { LIMIT_7, 34, 2 },
+    { LIMIT_7, 34, 2 },
+    { LIMIT_5, 36, 2 },
+    { LIMIT_5, 36, 2 },
+    { LIMIT_5, 36, 2 },
+    { LIMIT_5, 39, 2 },
+    { LIMIT_5, 39, 2 },
+    { LIMIT_5, 39, 2 },
+    { LIMIT_7, 41, 2 },
+    { LIMIT_7, 41, 2 },
+    { LIMIT_7, 43, 2 },
+    { LIMIT_3, 44, 1 },
+    { LIMIT_COMPLEX, 45, 3 },
+    { LIMIT_COMPLEX, 46, 3 },
+    { LIMIT_5, 48, 2 },
+    { LIMIT_5, 48, 2 },
+    { LIMIT_5, 48, 2 },
+    { LIMIT_COMPLEX, 50, 3 },
+    { LIMIT_COMPLEX, 51, 3 },
+    { LIMIT_COMPLEX, 52, 3 },
+};
+
+// =======================
+// Harmonic LUT for 58-EDO
+// =======================
+constexpr HarmonicStep harmonicLUT_58[58] = {
+    { LIMIT_1, 0, 1 },
+    { LIMIT_COMPLEX, 1, 3 },
+    { LIMIT_COMPLEX, 2, 3 },
+    { LIMIT_COMPLEX, 3, 3 },
+    { LIMIT_COMPLEX, 4, 3 },
+    { LIMIT_5, 5, 2 },
+    { LIMIT_5, 5, 2 },
+    { LIMIT_11, 7, 2 },
+    { LIMIT_11, 7, 2 },
+    { LIMIT_3, 10, 1 },
+    { LIMIT_3, 10, 1 },
+    { LIMIT_7, 11, 2 },
+    { LIMIT_7, 11, 2 },
+    { LIMIT_7, 13, 2 },
+    { LIMIT_7, 13, 2 },
+    { LIMIT_5, 15, 2 },
+    { LIMIT_5, 15, 2 },
+    { LIMIT_13, 17, 2 },
+    { LIMIT_5, 19, 2 },
+    { LIMIT_5, 19, 2 },
+    { LIMIT_7, 21, 2 },
+    { LIMIT_7, 21, 2 },
+    { LIMIT_7, 21, 2 },
+    { LIMIT_COMPLEX, 23, 3 },
+    { LIMIT_3, 24, 1 },
+    { LIMIT_3, 24, 1 },
+    { LIMIT_11, 27, 2 },
+    { LIMIT_7, 28, 2 },
+    { LIMIT_7, 28, 2 },
+    { LIMIT_7, 30, 2 },
+    { LIMIT_7, 30, 2 },
+    { LIMIT_7, 30, 2 },
+    { LIMIT_11, 31, 2 },
+    { LIMIT_3, 34, 1 },
+    { LIMIT_3, 34, 1 },
+    { LIMIT_COMPLEX, 35, 3 },
+    { LIMIT_7, 37, 2 },
+    { LIMIT_7, 37, 2 },
+    { LIMIT_7, 37, 2 },
+    { LIMIT_5, 39, 2 },
+    { LIMIT_5, 39, 2 },
+    { LIMIT_13, 41, 2 },
+    { LIMIT_5, 43, 2 },
+    { LIMIT_5, 43, 2 },
+    { LIMIT_7, 45, 2 },
+    { LIMIT_7, 45, 2 },
+    { LIMIT_7, 47, 2 },
+    { LIMIT_7, 47, 2 },
+    { LIMIT_3, 48, 1 },
+    { LIMIT_3, 48, 1 },
+    { LIMIT_COMPLEX, 50, 3 },
+    { LIMIT_COMPLEX, 51, 3 },
+    { LIMIT_5, 53, 2 },
+    { LIMIT_5, 53, 2 },
+    { LIMIT_COMPLEX, 54, 3 },
+    { LIMIT_COMPLEX, 55, 3 },
+    { LIMIT_COMPLEX, 56, 3 },
+    { LIMIT_COMPLEX, 57, 3 },
+};
+
+// =======================
+// Harmonic LUT for 72-EDO
+// =======================
+constexpr HarmonicStep harmonicLUT_72[72] = {
+    { LIMIT_1, 0, 1 },
+    { LIMIT_COMPLEX, 1, 3 },
+    { LIMIT_COMPLEX, 2, 3 },
+    { LIMIT_COMPLEX, 3, 3 },
+    { LIMIT_COMPLEX, 4, 3 },
+    { LIMIT_COMPLEX, 5, 3 },
+    { LIMIT_5, 7, 2 },
+    { LIMIT_5, 7, 2 },
+    { LIMIT_5, 7, 2 },
+    { LIMIT_11, 9, 2 },
+    { LIMIT_11, 9, 2 },
+    { LIMIT_COMPLEX, 11, 3 },
+    { LIMIT_3, 12, 2 },
+    { LIMIT_3, 12, 2 },
+    { LIMIT_7, 14, 2 },
+    { LIMIT_7, 16, 2 },
+    { LIMIT_7, 16, 2 },
+    { LIMIT_7, 16, 2 },
+    { LIMIT_5, 19, 2 },
+    { LIMIT_5, 19, 2 },
+    { LIMIT_5, 19, 2 },
+    { LIMIT_13, 22, 3 },
+    { LIMIT_5, 23, 2 },
+    { LIMIT_5, 23, 2 },
+    { LIMIT_5, 23, 2 },
+    { LIMIT_7, 26, 2 },
+    { LIMIT_7, 26, 2 },
+    { LIMIT_7, 26, 2 },
+    { LIMIT_COMPLEX, 28, 3 },
+    { LIMIT_3, 30, 2 },
+    { LIMIT_3, 30, 2 },
+    { LIMIT_3, 30, 2 },
+    { LIMIT_11, 33, 2 },
+    { LIMIT_11, 33, 2 },
+    { LIMIT_7, 35, 2 },
+    { LIMIT_7, 35, 2 },
+    { LIMIT_7, 37, 2 },
+    { LIMIT_7, 37, 2 },
+    { LIMIT_7, 37, 2 },
+    { LIMIT_11, 39, 2 },
+    { LIMIT_11, 39, 2 },
+    { LIMIT_3, 42, 2 },
+    { LIMIT_3, 42, 2 },
+    { LIMIT_3, 42, 2 },
+    { LIMIT_COMPLEX, 44, 3 },
+    { LIMIT_7, 46, 2 },
+    { LIMIT_7, 46, 2 },
+    { LIMIT_7, 46, 2 },
+    { LIMIT_5, 49, 2 },
+    { LIMIT_5, 49, 2 },
+    { LIMIT_5, 49, 2 },
+    { LIMIT_13, 50, 3 },
+    { LIMIT_5, 53, 2 },
+    { LIMIT_5, 53, 2 },
+    { LIMIT_5, 53, 2 },
+    { LIMIT_7, 56, 2 },
+    { LIMIT_7, 56, 2 },
+    { LIMIT_7, 56, 2 },
+    { LIMIT_7, 58, 2 },
+    { LIMIT_3, 60, 2 },
+    { LIMIT_3, 60, 2 },
+    { LIMIT_COMPLEX, 61, 3 },
+    { LIMIT_COMPLEX, 62, 3 },
+    { LIMIT_COMPLEX, 63, 3 },
+    { LIMIT_5, 65, 2 },
+    { LIMIT_5, 65, 2 },
+    { LIMIT_5, 65, 2 },
+    { LIMIT_COMPLEX, 67, 3 },
+    { LIMIT_COMPLEX, 68, 3 },
+    { LIMIT_COMPLEX, 69, 3 },
+    { LIMIT_COMPLEX, 70, 3 },
+    { LIMIT_COMPLEX, 71, 3 },
+};
+
+// =======================
+// Harmonic LUT for 80-EDO
+// =======================
+constexpr HarmonicStep harmonicLUT_80[80] = {
+    { LIMIT_1, 0, 1 },
+    { LIMIT_COMPLEX, 1, 4 },
+    { LIMIT_COMPLEX, 2, 4 },
+    { LIMIT_COMPLEX, 3, 4 },
+    { LIMIT_COMPLEX, 4, 4 },
+    { LIMIT_COMPLEX, 5, 4 },
+    { LIMIT_5, 7, 2 },
+    { LIMIT_5, 7, 2 },
+    { LIMIT_5, 7, 2 },
+    { LIMIT_5, 7, 2 },
+    { LIMIT_11, 10, 2 },
+    { LIMIT_11, 10, 2 },
+    { LIMIT_11, 10, 2 },
+    { LIMIT_3, 14, 2 },
+    { LIMIT_3, 14, 2 },
+    { LIMIT_7, 15, 2 },
+    { LIMIT_7, 15, 2 },
+    { LIMIT_7, 18, 2 },
+    { LIMIT_7, 18, 2 },
+    { LIMIT_7, 18, 2 },
+    { LIMIT_5, 21, 2 },
+    { LIMIT_5, 21, 2 },
+    { LIMIT_5, 21, 2 },
+    { LIMIT_13, 24, 3 },
+    { LIMIT_13, 24, 3 },
+    { LIMIT_5, 26, 2 },
+    { LIMIT_5, 26, 2 },
+    { LIMIT_5, 26, 2 },
+    { LIMIT_7, 29, 2 },
+    { LIMIT_7, 29, 2 },
+    { LIMIT_7, 29, 2 },
+    { LIMIT_COMPLEX, 31, 4 },
+    { LIMIT_3, 33, 2 },
+    { LIMIT_3, 33, 2 },
+    { LIMIT_3, 33, 2 },
+    { LIMIT_11, 37, 2 },
+    { LIMIT_11, 37, 2 },
+    { LIMIT_11, 37, 2 },
+    { LIMIT_7, 39, 2 },
+    { LIMIT_7, 39, 2 },
+    { LIMIT_7, 41, 2 },
+    { LIMIT_7, 41, 2 },
+    { LIMIT_7, 41, 2 },
+    { LIMIT_11, 43, 2 },
+    { LIMIT_11, 43, 2 },
+    { LIMIT_11, 43, 2 },
+    { LIMIT_3, 47, 2 },
+    { LIMIT_3, 47, 2 },
+    { LIMIT_3, 47, 2 },
+    { LIMIT_COMPLEX, 49, 4 },
+    { LIMIT_7, 51, 2 },
+    { LIMIT_7, 51, 2 },
+    { LIMIT_7, 51, 2 },
+    { LIMIT_5, 54, 2 },
+    { LIMIT_5, 54, 2 },
+    { LIMIT_5, 54, 2 },
+    { LIMIT_13, 56, 3 },
+    { LIMIT_13, 56, 3 },
+    { LIMIT_5, 59, 2 },
+    { LIMIT_5, 59, 2 },
+    { LIMIT_5, 59, 2 },
+    { LIMIT_7, 62, 2 },
+    { LIMIT_7, 62, 2 },
+    { LIMIT_7, 62, 2 },
+    { LIMIT_7, 65, 2 },
+    { LIMIT_7, 65, 2 },
+    { LIMIT_3, 66, 2 },
+    { LIMIT_3, 66, 2 },
+    { LIMIT_COMPLEX, 68, 4 },
+    { LIMIT_COMPLEX, 69, 4 },
+    { LIMIT_COMPLEX, 70, 4 },
+    { LIMIT_5, 73, 2 },
+    { LIMIT_5, 73, 2 },
+    { LIMIT_5, 73, 2 },
+    { LIMIT_5, 73, 2 },
+    { LIMIT_COMPLEX, 75, 4 },
+    { LIMIT_COMPLEX, 76, 4 },
+    { LIMIT_COMPLEX, 77, 4 },
+    { LIMIT_COMPLEX, 78, 4 },
+    { LIMIT_COMPLEX, 79, 4 },
+};
+
+// =======================
+// Harmonic LUT for 87-EDO
+// =======================
+constexpr HarmonicStep harmonicLUT_87[87] = {
+    { LIMIT_1, 0, 1 },
+    { LIMIT_COMPLEX, 1, 4 },
+    { LIMIT_COMPLEX, 2, 4 },
+    { LIMIT_COMPLEX, 3, 4 },
+    { LIMIT_COMPLEX, 4, 4 },
+    { LIMIT_COMPLEX, 5, 4 },
+    { LIMIT_COMPLEX, 6, 4 },
+    { LIMIT_5, 8, 2 },
+    { LIMIT_5, 8, 2 },
+    { LIMIT_5, 8, 2 },
+    { LIMIT_11, 11, 3 },
+    { LIMIT_11, 11, 3 },
+    { LIMIT_11, 11, 3 },
+    { LIMIT_11, 11, 3 },
+    { LIMIT_3, 15, 2 },
+    { LIMIT_3, 15, 2 },
+    { LIMIT_3, 15, 2 },
+    { LIMIT_7, 17, 2 },
+    { LIMIT_7, 17, 2 },
+    { LIMIT_7, 19, 2 },
+    { LIMIT_7, 19, 2 },
+    { LIMIT_7, 19, 2 },
+    { LIMIT_5, 23, 2 },
+    { LIMIT_5, 23, 2 },
+    { LIMIT_5, 23, 2 },
+    { LIMIT_13, 26, 3 },
+    { LIMIT_13, 26, 3 },
+    { LIMIT_5, 28, 2 },
+    { LIMIT_5, 28, 2 },
+    { LIMIT_5, 28, 2 },
+    { LIMIT_7, 32, 2 },
+    { LIMIT_7, 32, 2 },
+    { LIMIT_7, 32, 2 },
+    { LIMIT_7, 32, 2 },
+    { LIMIT_COMPLEX, 34, 4 },
+    { LIMIT_3, 36, 2 },
+    { LIMIT_3, 36, 2 },
+    { LIMIT_3, 36, 2 },
+    { LIMIT_11, 40, 3 },
+    { LIMIT_11, 40, 3 },
+    { LIMIT_11, 40, 3 },
+    { LIMIT_7, 42, 2 },
+    { LIMIT_7, 42, 2 },
+    { LIMIT_7, 42, 2 },
+    { LIMIT_7, 45, 2 },
+    { LIMIT_7, 45, 2 },
+    { LIMIT_7, 45, 2 },
+    { LIMIT_11, 47, 3 },
+    { LIMIT_11, 47, 3 },
+    { LIMIT_11, 47, 3 },
+    { LIMIT_3, 51, 2 },
+    { LIMIT_3, 51, 2 },
+    { LIMIT_3, 51, 2 },
+    { LIMIT_COMPLEX, 53, 4 },
+    { LIMIT_7, 55, 2 },
+    { LIMIT_7, 55, 2 },
+    { LIMIT_7, 55, 2 },
+    { LIMIT_7, 55, 2 },
+    { LIMIT_5, 59, 2 },
+    { LIMIT_5, 59, 2 },
+    { LIMIT_5, 59, 2 },
+    { LIMIT_13, 61, 3 },
+    { LIMIT_13, 61, 3 },
+    { LIMIT_5, 64, 2 },
+    { LIMIT_5, 64, 2 },
+    { LIMIT_5, 64, 2 },
+    { LIMIT_7, 68, 2 },
+    { LIMIT_7, 68, 2 },
+    { LIMIT_7, 68, 2 },
+    { LIMIT_7, 70, 2 },
+    { LIMIT_7, 70, 2 },
+    { LIMIT_3, 72, 2 },
+    { LIMIT_3, 72, 2 },
+    { LIMIT_3, 72, 2 },
+    { LIMIT_COMPLEX, 74, 4 },
+    { LIMIT_COMPLEX, 75, 4 },
+    { LIMIT_COMPLEX, 76, 4 },
+    { LIMIT_COMPLEX, 77, 4 },
+    { LIMIT_5, 79, 2 },
+    { LIMIT_5, 79, 2 },
+    { LIMIT_5, 79, 2 },
+    { LIMIT_COMPLEX, 81, 4 },
+    { LIMIT_COMPLEX, 82, 4 },
+    { LIMIT_COMPLEX, 83, 4 },
+    { LIMIT_COMPLEX, 84, 4 },
+    { LIMIT_COMPLEX, 85, 4 },
+    { LIMIT_COMPLEX, 86, 4 },
+};
+
+// =======================
+// Harmonic LUT descriptors
+// =======================
+constexpr HarmonicLUTDesc HARMONIC_LUTS[] = {
+    { 12, harmonicLUT_12 },
+    { 17, harmonicLUT_17 },
+    { 19, harmonicLUT_19 },
+    { 22, harmonicLUT_22 },
+    { 24, harmonicLUT_24 },
+    { 31, harmonicLUT_31 },
+    { 41, harmonicLUT_41 },
+    { 43, harmonicLUT_43 },
+    { 46, harmonicLUT_46 },
+    { 53, harmonicLUT_53 },
+    { 58, harmonicLUT_58 },
+    { 72, harmonicLUT_72 },
+    { 80, harmonicLUT_80 },
+    { 87, harmonicLUT_87 },
+};
+
+const HarmonicStep* currentHarmonicLUT = nullptr;
+uint8_t currentHarmonicEDO = 0;
+
+static inline void selectHarmonicLUT(uint8_t edo) {
+    currentHarmonicLUT = nullptr;
+    currentHarmonicEDO = edo;
+
+    for (const auto& desc : HARMONIC_LUTS) {
+        if (desc.edo == edo) {
+            currentHarmonicLUT = desc.lut;
+            return;
+        }
+    }
+    // Si no hay LUT para este EDO, queda nullptr (fallback)
+}
+
 // @LED
 /*
     This section of the code handles sending
@@ -1615,6 +2419,11 @@ uint32_t getLEDcode(colorDef c) {
     codes remain in the object until this routine is called again.
   */
 void setLEDcolorCodes() {
+  if (colorMode == DYNAMIC_HARMONIC_MODE) {
+    // LEDcodeRest is handled by updateDynamicLighting()
+    return;
+  }
+
   for (byte i = 0; i < LED_COUNT; i++) {
     if (!(h[i].isCmd)) {
       colorDef setColor;
@@ -1951,6 +2760,102 @@ void lightUpLEDs() {
   resetVelocityLEDs();
   resetWheelLEDs();
   strip.show();
+}
+
+// ============================================================
+// Dynamic Harmonic Lighting
+// ============================================================
+
+void RAM_FUNC(updateDynamicLighting)() {
+
+  // ----------------------------------------------------------
+  // Validaciones defensivas
+  // ----------------------------------------------------------
+  if (!currentHarmonicLUT || currentHarmonicEDO == 0) {
+    return;
+  }
+
+  // Si no hay teclas activas, apagamos o dejamos neutro
+  if (pressedKeyIDs.empty()) {
+    for (byte i = 0; i < LED_COUNT; i++) {
+      h[i].LEDcodeRest = 0;  // negro / apagado
+    }
+    return;
+  }
+
+  // ----------------------------------------------------------
+  // Bucle principal: para cada LED del tablero
+  // ----------------------------------------------------------
+  for (byte i = 0; i < LED_COUNT; i++) {
+
+    // Ignorar teclas de comando
+    if (h[i].isCmd) {
+      h[i].LEDcodeRest = 0;
+      continue;
+    }
+
+    // Estado acumulado
+    uint8_t bestPrimeLimit = LIMIT_COMPLEX;
+    bool isConsonant = true;
+
+    // ------------------------------------------------------
+    // Comparar este LED con cada tecla activa
+    // ------------------------------------------------------
+    for (byte activeKey : pressedKeyIDs) {
+
+      // Distancia interválica en steps
+      int16_t distSteps =
+          h[i].stepsFromC - h[activeKey].stepsFromC;
+
+      // Módulo EDO (positivo)
+      distSteps = positiveMod(distSteps, currentHarmonicEDO);
+
+      // Unísono: permitido, pero no aporta color
+      if (distSteps == 0) {
+        continue;
+      }
+
+      // Lookup armónico
+      const HarmonicStep& hs =
+          currentHarmonicLUT[distSteps];
+
+      // Comprobación de consonancia
+      int16_t stepError =
+          abs(distSteps - hs.idealStep);
+
+      // Ajuste circular (wrap)
+      stepError = min(stepError,
+                      currentHarmonicEDO - stepError);
+
+      if (stepError > hs.maxError) {
+        isConsonant = false;
+        break;  // basta una disonancia
+      }
+
+      // Actualizar límite primo dominante
+      if (hs.primeLimit < bestPrimeLimit) {
+        bestPrimeLimit = hs.primeLimit;
+      }
+    }
+
+    // ------------------------------------------------------
+    // Decidir color final
+    // ------------------------------------------------------
+    if (!isConsonant) {
+      // Disonante con al menos una tecla activa
+      h[i].LEDcodeRest = 0;
+    } else {
+      colorDef c;
+      c.hue = PRIME_LIMIT_HUES[bestPrimeLimit];
+      c.sat = SAT_VIVID;     // coherente con otros modos
+      c.val = VALUE_NORMAL; // valor base
+
+      // aplicar control global de brillo
+      c.val = applyLEDLevel(c.val, ledRestBrightness);
+
+      h[i].LEDcodeRest = getLEDcode(c);
+    }
+  }
 }
 
 // @MIDI
@@ -2827,6 +3732,11 @@ void tryMIDInoteOn(byte x) {
         "Sent MIDI pitch bend: " + std::to_string(pitchBendValue) + " to ch " + std::to_string(h[x].MIDIch));
       sendToLog(
         "Sent MIDI noteOn: " + std::to_string(h[x].note) + " vel " + std::to_string(velWheel.curValue) + " ch " + std::to_string(h[x].MIDIch));
+
+      // --- Dynamic Harmonic Lighting ---
+      if (colorMode == DYNAMIC_HARMONIC_MODE) {
+        updateDynamicLighting();
+      }
     }
   }
 }
@@ -2852,6 +3762,11 @@ void tryMIDInoteOff(byte x) {
       releaseMPEChannel(h[x].MIDIch);
     }
     h[x].MIDIch = 0;
+
+    // --- Dynamic Harmonic Lighting ---
+    if (colorMode == DYNAMIC_HARMONIC_MODE) {
+      updateDynamicLighting();
+    }
   }
 }
 
@@ -5681,7 +6596,7 @@ GEMItem menuItemToggleDynamicJI("Dynamic JI", useDynamicJustIntonation, universa
 
 //////////////////////////////////////////////////////////////////////////////////////////////////////
 
-SelectOptionByte optionByteColor[] = { { "Rainbow", RAINBOW_MODE }, { "Tiered", TIERED_COLOR_MODE }, { "Alt", ALTERNATE_COLOR_MODE }, { "Fifths", RAINBOW_OF_FIFTHS_MODE }, { "Piano", PIANO_COLOR_MODE }, { "Alt Piano", PIANO_ALT_COLOR_MODE }, { "Filament", PIANO_INCANDESCENT_COLOR_MODE } };
+SelectOptionByte optionByteColor[] = { { "Rainbow", RAINBOW_MODE }, { "Tiered", TIERED_COLOR_MODE }, { "Alt", ALTERNATE_COLOR_MODE }, { "Fifths", RAINBOW_OF_FIFTHS_MODE }, { "Piano", PIANO_COLOR_MODE }, { "Alt Piano", PIANO_ALT_COLOR_MODE }, { "Filament", PIANO_INCANDESCENT_COLOR_MODE }, { "Harmonic", DYNAMIC_HARMONIC_MODE } };
 GEMSelect selectColor(sizeof(optionByteColor) / sizeof(SelectOptionByte), optionByteColor);
 PersistentCallbackInfo callbackInfoColorMode = {
   static_cast<uint8_t>(SettingKey::ColorMode),
@@ -6130,6 +7045,7 @@ void changeTuning(GEMCallbackData callbackData) {
     current.layoutIndex = current.layoutsBegin();         // reset layout to first in list
     current.scaleIndex = 0;                               // reset scale to "no scale"
     current.keyStepsFromA = current.tuning().spanCtoA();  // reset key to C
+    selectHarmonicLUT(current.tuning().cycleLength);
     // 2) Copy and save all values to settings
     settings[static_cast<uint8_t>(SettingKey::CurrentTuning)]        = current.tuningIndex;
     settings[static_cast<uint8_t>(SettingKey::CurrentLayout)]        = current.layoutIndex;
@@ -6565,6 +7481,7 @@ void setup() {
   setupHardware();
   syncSettingsToRuntime();
   recomputePitchBendFactor();
+  selectHarmonicLUT(current.tuning().cycleLength);
 }
 void loop() {        // run on first core
   timeTracker();     // Time tracking functions
