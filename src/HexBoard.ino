@@ -2775,11 +2775,13 @@ void RAM_FUNC(updateDynamicLighting)() {
     return;
   }
 
-  // Si no hay teclas activas, apagamos o dejamos neutro
+  // Si no hay teclas activas, fallback a modo incandescente estático
   if (pressedKeyIDs.empty()) {
-    for (byte i = 0; i < LED_COUNT; i++) {
-      h[i].LEDcodeRest = 0;  // negro / apagado
-    }
+    // Fallback: use incandescente estático
+    byte prevMode = colorMode;
+    colorMode = PIANO_INCANDESCENT_COLOR_MODE;
+    setLEDcolorCodes();
+    colorMode = prevMode;
     return;
   }
 
@@ -2825,22 +2827,27 @@ void RAM_FUNC(updateDynamicLighting)() {
 
       // Ajuste circular (wrap)
       stepError = min(stepError, currentHarmonicEDO - stepError);
-      int maxErr = min(hs.maxError, 4);  // clamp perceptual
+      int maxErr = min(hs.maxError, 2);  // clamp perceptual
+      /*
       if (stepError > maxErr) {
         brightness = 0.0f;
         break;
       }
+      */
 
       // atenuación suave
       float x = float(stepError) / float(hs.maxError); // 0..1
       float atten = 1.0f - x;
-      atten = atten * atten * atten;   // cúbica (mucho más perceptual)
+      atten = atten * atten * atten * atten;   // A la cuarta (mucho más perceptual)
       brightness *= atten;
-
 
       // Actualizar límite primo dominante
       if (hs.primeLimit < bestPrimeLimit) {
         bestPrimeLimit = hs.primeLimit;
+      }
+
+      if (hs.primeLimit >= LIMIT_7) {
+          brightness *= 0.6f;
       }
     }
 
