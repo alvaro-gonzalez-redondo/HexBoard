@@ -1,238 +1,185 @@
 import math
-from math import gcd
 from dataclasses import dataclass
-from typing import Optional
+from typing import List
 
 # ============================================================
-# CONFIGURACIÓN GLOBAL
+# CONFIGURACIÓN: MODO "EXPLORADOR" (Permisivo)
 # ============================================================
-
 EDOS = [12, 17, 19, 22, 24, 31, 41, 43, 46, 53, 58, 72, 80, 87]
 
-# Umbral máximo absoluto si no encaja en nada
-MAX_COMPLEX_ERROR_CENTS = 50.0
+# Ahora toleramos mucha aspereza (75% de un semitono) en límites altos
+# para permitir que se vean colores exóticos.
+HIGH_LIMIT_ROUGHNESS_TOLERANCE = 0.75 
 
-# Umbral por prime-limit (en cents)
-MAX_ERROR_BY_LIMIT = {
-    1: 5,
-    3: 20,
-    5: 25,
-    7: 25,
-    11: 30,
-    13: 35,
-    17: 15,
-}
+# Ignorar intervalos minúsculos (ruido de afinación)
+MIN_INTERVAL_CENTS = 35.0 
 
 # ============================================================
-# VOCABULARIO DE RATIOS (normalizado luego)
+# MATH CORE
 # ============================================================
+def calculate_raw_roughness(ratio: float) -> float:
+    freq_base = 261.63
+    freq_ratio = freq_base * ratio
+    N = 10
+    R = 0.0
+    for i in range(1, N + 1):
+        for j in range(1, N + 1):
+            p1 = freq_base * i; p2 = freq_ratio * j
+            # Timbre musical estándar
+            a1 = 1.0 / (i ** 1.5); a2 = 1.0 / (j ** 1.5)
+            f_min = min(p1, p2); df = abs(p1 - p2)
+            cbw = 0.24 * (f_min + 25.0); x = df / cbw
+            term1 = math.exp(-3.5 * x); term2 = math.exp(-5.75 * x)
+            dis = (a1 * a2) * (term1 - term2)
+            R += max(dis, 0.0)
+    return R
 
-RAW_ALLOWED_RATIOS = [
-    # 1-limit
-    (1, 1),
-    (2, 1),
+MAX_REF_ROUGHNESS = 1.0
+def normalize_roughness(ratio: float) -> float:
+    return calculate_raw_roughness(ratio) / MAX_REF_ROUGHNESS
 
-    # 3-limit
-    (3, 2),
-    (4, 3),
-    (9, 8),
-    (16, 9),
+def get_prime_limit(n: int) -> int:
+    if n <= 1: return 1
+    d = 2; temp = n; limit = 1
+    while d * d <= temp:
+        while temp % d == 0: limit = max(limit, d); temp //= d
+        d += 1
+    if temp > 1: limit = max(limit, temp)
+    return limit
 
-    # 5-limit
-    (5, 4),
-    (6, 5),
-    (16, 15),
-    (8, 5),
-    (5, 3),
-    (15, 8),
-
-    # 7-limit
-    (7, 4),
-    (8, 7),
-    (7, 6),
-    (9, 7),
-    (7, 5),
-    (10, 7),
-    (14, 9),
-    (12, 7),
-
-    # 11-limit
-    (11, 8),
-    (12, 11),
-    (14, 11),
-    (16, 11),
-    (11, 7),
-
-    # 13-limit
-    (13, 8),
-    (16, 13),
-
-    # 17-limit
-    (17, 16),
-]
-
-# ============================================================
-# HELPERS ARMÓNICOS
-# ============================================================
-
-def prime_limit_of_int(n: int) -> Optional[int]:
-    if n <= 0:
-        return None
-    while n % 2 == 0:
-        n //= 2
-    for p in (17, 13, 11, 7, 5, 3):
-        if n % p == 0:
-            return p
-    return 1
-
-
-def reduce_ratio(n: int, d: int) -> tuple[int, int]:
-    g = gcd(n, d)
-    return n // g, d // g
-
-
-def normalize_to_octave(n: int, d: int) -> tuple[int, int]:
-    n, d = reduce_ratio(n, d)
-    while n < d:
-        n *= 2
-    while n >= 2 * d:
-        d *= 2
-    return reduce_ratio(n, d)
-
-
-def ratio_to_cents(n: int, d: int) -> float:
-    return 1200.0 * math.log2(n / d)
-
-
-def ratio_prime_limit(n: int, d: int) -> Optional[int]:
-    lim_n = prime_limit_of_int(n)
-    lim_d = prime_limit_of_int(d)
-    if lim_n is None or lim_d is None:
-        return None
-    return max(lim_n, lim_d)
-
-
-# ============================================================
-# CANDIDATOS ARMÓNICOS
-# ============================================================
-
-@dataclass(frozen=True)
-class RatioCand:
-    n: int
-    d: int
-    limit: int
-    cents: float
-
-
-def build_candidates(raw_ratios) -> list[RatioCand]:
-    seen = set()
-    cands: list[RatioCand] = []
-
-    for n, d in raw_ratios:
-        n, d = normalize_to_octave(n, d)
-        key = (n, d)
-        if key in seen:
-            continue
-        seen.add(key)
-
-        lim = ratio_prime_limit(n, d)
-        if lim is None or lim > 17:
-            continue
-
-        cands.append(RatioCand(
-            n=n,
-            d=d,
-            limit=lim,
-            cents=ratio_to_cents(n, d)
-        ))
-
-    # Orden estable: primero más simple (menor prime-limit)
-    cands.sort(key=lambda r: (r.limit, r.cents))
-    return cands
-
-
-# ============================================================
-# GENERACIÓN DE LUT POR EDO
-# ============================================================
+def gcd(a, b):
+    while b: a, b = b, a % b
+    return a
 
 @dataclass
-class HarmonicStep:
-    limit_enum: str
-    ideal_step: int
-    max_error_steps: int
+class RatioInfo:
+    n: int; d: int; limit: int; cents: float; norm_roughness: float; priority: int
 
+def calibrate_system():
+    global MAX_REF_ROUGHNESS
+    MAX_REF_ROUGHNESS = calculate_raw_roughness(16.0 / 15.0)
+    print(f"// Calibrated Semitone Roughness: {MAX_REF_ROUGHNESS:.4f}")
 
-def build_lut_for_edo(edo: int, candidates: list[RatioCand]) -> list[HarmonicStep]:
-    step_cents = 1200.0 / edo
-    lut: list[HarmonicStep] = []
+# ============================================================
+# GENERACIÓN DE BASE DE DATOS
+# ============================================================
+def generate_database() -> List[RatioInfo]:
+    db = []; seen = set()
+    max_denom = 60
+    
+    for d in range(1, max_denom + 1):
+        for n in range(1, int(d * 2.1)): 
+            c = gcd(n, d); nn, dd = n//c, d//c
+            val = nn / dd
+            if val < 1.0 or val >= 2.0: continue
+            if (nn, dd) in seen: continue
+            seen.add((nn, dd))
+            
+            lim = max(get_prime_limit(nn), get_prime_limit(dd))
+            if lim > 23: continue # Subimos un poco el límite de primos aceptados
 
-    for step in range(edo):
-        sc = step * step_cents
-        best = None  # (limit, error_cents, ideal_step)
+            norm_r = normalize_roughness(val)
+            cents = 1200.0 * math.log2(val)
+            
+            # PRIORIDAD:
+            # Forzamos que 3 y 5 ganen siempre la etiqueta si están disponibles.
+            prio = 10
+            if nn == 1 or dd == 1: prio = 0
+            elif lim <= 3: prio = 1
+            elif lim <= 5: prio = 2
+            elif lim <= 7: prio = 3
+            elif lim <= 11: prio = 4
+            else: prio = 5
+            
+            if nn > 45 or dd > 45: prio += 1
 
-        for r in candidates:
-            max_err_cents = MAX_ERROR_BY_LIMIT.get(r.limit, 0)
-            err = abs(sc - r.cents)
-            err = min(err, 1200.0 - err)
+            db.append(RatioInfo(nn, dd, lim, cents, norm_r, prio))
+    
+    db.append(RatioInfo(2, 1, 1, 1200.0, 0.0, 0))
+    return db
 
-            if err > max_err_cents:
+def emit_cpp(edos):
+    calibrate_system()
+    database = generate_database()
+    
+    print("// AUTOGENERATED HARMONIC LUTS (Permissive High-Limits)")
+    
+    for edo in edos:
+        step_size = 1200.0 / edo
+        print(f"constexpr HarmonicStep harmonicLUT_{edo}[{edo}] = {{")
+        
+        for step in range(edo):
+            target_cents = step * step_size
+            
+            # 1. Filtro vecindad
+            candidates = [r for r in database if abs(r.cents - target_cents) < (step_size * 0.6) or abs((1200-r.cents) - target_cents) < (step_size * 0.6)]
+            
+            if not candidates:
+                print(f"    {{ LIMIT_COMPLEX, 0, {step}, 1 }}, // Step {step} (Orphan)")
                 continue
 
-            ideal = round(edo * math.log2(r.n / r.d)) % edo
+            # 2. Selección del Mejor
+            best_metric = 99999.0
+            best_cand = candidates[0]
+            
+            for cand in candidates:
+                dist = abs(cand.cents - target_cents)
+                if dist > 600: dist = 1200 - dist
+                
+                # Métrica: Prioridad pesa, pero dejamos margen al error
+                metric = (cand.priority * 500.0) + (cand.norm_roughness * 50.0) + dist
+                
+                if metric < best_metric:
+                    best_metric = metric
+                    best_cand = cand
+            
+            # 3. FILTRO MUY RELAJADO
+            final_limit_str = f"LIMIT_{best_cand.limit}"
+            is_complex = False
+            
+            # Solo marcamos COMPLEX si es basura de afinación
+            if best_cand.cents < MIN_INTERVAL_CENTS and best_cand.cents > 0.01:
+                is_complex = True
 
-            if best is None or (r.limit < best[0]) or (r.limit == best[0] and err < best[1]):
-                best = (r.limit, err, ideal)
+            # O si es EXTREMADAMENTE áspero (Nivel Semitono)
+            elif best_cand.norm_roughness > 0.85:
+                 is_complex = True
+            
+            # Tambien si es mayor de 17
+            if best_cand.limit > 17:
+                is_complex = True
 
-        if best is None:
-            max_err_steps = max(1, math.ceil(MAX_COMPLEX_ERROR_CENTS / step_cents))
-            lut.append(HarmonicStep(
-                "LIMIT_COMPLEX",
-                step,
-                max_err_steps
-            ))
-        else:
-            lim, err, ideal = best
-            max_err_steps = max(1, math.ceil(MAX_ERROR_BY_LIMIT[lim] / step_cents))
-            lut.append(HarmonicStep(
-                f"LIMIT_{lim}",
-                ideal,
-                max_err_steps
-            ))
+            if is_complex and best_cand.n != 1:
+                final_limit_str = "LIMIT_COMPLEX"
+            
+            # 4. Consonancia para el Firmware
+            # Mapeamos [0.0 - 0.85] -> [255 - 20]
+            # Dejamos que el firmware atenúe, no matamos aquí.
+            cons_score = 1.0 - best_cand.norm_roughness
+            
+            # Pequeño boost a límites bajos para asegurar estabilidad
+            if best_cand.limit <= 5: cons_score += 0.2
+            
+            if cons_score > 1.0: cons_score = 1.0
+            if cons_score < 0.1: cons_score = 0.1 # Suelo mínimo
+            
+            if final_limit_str == "LIMIT_COMPLEX":
+                cons_byte = 0 # Complex sí apaga
+            else:
+                cons_byte = int(cons_score * 255)
 
-    return lut
+            ideal = round(best_cand.cents / step_size) % edo
+            max_err = max(1, int(45.0 / step_size)) # Tolerancia amplia
 
+            debug_info = f"// {step}: {best_cand.n}/{best_cand.d} (Lim:{best_cand.limit}, R:{best_cand.norm_roughness:.2f})"
+            print(f"    {{ {final_limit_str}, {cons_byte}, {ideal}, {max_err} }}, {debug_info}")
 
-# ============================================================
-# EMISIÓN C++
-# ============================================================
-
-def emit_cpp_luts(edos):
-    candidates = build_candidates(RAW_ALLOWED_RATIOS)
-
-    for edo in edos:
-        lut = build_lut_for_edo(edo, candidates)
-
-        print(f"// =======================")
-        print(f"// Harmonic LUT for {edo}-EDO")
-        print(f"// =======================")
-        print(f"constexpr HarmonicStep harmonicLUT_{edo}[{edo}] = {{")
-        for h in lut:
-            print(f"    {{ {h.limit_enum}, {h.ideal_step}, {h.max_error_steps} }},")
         print("};\n")
 
-    # Descriptor table
-    print("// =======================")
-    print("// Harmonic LUT descriptors")
-    print("// =======================")
     print("constexpr HarmonicLUTDesc HARMONIC_LUTS[] = {")
     for edo in edos:
         print(f"    {{ {edo}, harmonicLUT_{edo} }},")
     print("};")
 
-
-# ============================================================
-# MAIN
-# ============================================================
-
 if __name__ == "__main__":
-    emit_cpp_luts(EDOS)
+    emit_cpp(EDOS)
